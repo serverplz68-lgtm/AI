@@ -1,135 +1,184 @@
 #!/bin/bash
+clear
+read -p "Enter your domain (e.g., panel.example.com): " DOMAIN
 
-# GitHub raw link for self-update
-REPO_URL="https://raw.githubusercontent.com/serverplz68-lgtm/AI/main/Ai.sh"
+# --- Script Branding ---
+MY_NAME="Brother"
 
-while true; do
-  clear
-  echo "==== AI Shell Helper ===="
-  echo "1) Code Test (Python)"
-  echo "2) Check Errors (Python)"
-  echo "3) Make Website (AI Website Generator)"
-  echo "4) Delete File/Folder"
-  echo "5) Update (Get latest AI file)"
-  echo "6) AI (future features)"
-  echo "7) Exit"
-  echo -n "Choose option: "
-  read choice
+# --- Dependencies ---
+apt update && apt install -y curl apt-transport-https ca-certificates gnupg unzip git tar sudo lsb-release software-properties-common
 
-  case $choice in
-    1)
-      echo -n "Enter Python file path to run: "
-      read file
-      if python3 "$file"; then
-        echo "✅ Code ran successfully!"
-      else
-        echo "❌ Code has errors!"
-      fi
-      ;;
-    2)
-      echo -n "Enter Python file path to check: "
-      read file
-      if python3 -m py_compile "$file" 2>error.log; then
-        echo "✅ No syntax errors found."
-      else
-        echo "❌ Errors found:"
-        cat error.log
-      fi
-      ;;
-    3)
-      echo -n "Enter website project name: "
-      read name
-      echo -n "Enter website type (e.g. Portfolio, Blog, Shop, Food, School): "
-      read type
-      mkdir -p "$name"
-      
-      case $type in
-        [Pp]ortfolio)
-          TITLE="My Portfolio"
-          BODY="<h1>Welcome to My Portfolio 🚀</h1>
-          <p>Here you can find my projects, skills, and contact info.</p>"
-          ;;
-        [Bb]log)
-          TITLE="My Blog"
-          BODY="<h1>Welcome to My Blog ✍️</h1>
-          <p>Sharing thoughts, tutorials, and stories.</p>"
-          ;;
-        [Ss]hop)
-          TITLE="My Shop"
-          BODY="<h1>Welcome to My Online Shop 🛒</h1>
-          <p>Browse products and place orders easily.</p>"
-          ;;
-        [Ff]ood)
-          TITLE="Food Delivery"
-          BODY="<h1>Delicious Food Delivered 🍔</h1>
-          <p>Order your favorite meals with fast home delivery.</p>"
-          ;;
-        [Ss]chool)
-          TITLE="School Website"
-          BODY="<h1>Welcome to Our School 🏫</h1>
-          <p>Learn, grow, and succeed with us.</p>"
-          ;;
-        *)
-          TITLE="$type Website"
-          BODY="<h1>Hello from $type 🚀</h1>
-          <p>This is a $type website created by AI Shell Helper.</p>"
-          ;;
-      esac
+# --- PHP & Redis Repos ---
+LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
 
-      cat > "$name/index.html" <<EOF
-<!DOCTYPE html>
-<html>
-<head>
-  <title>$TITLE</title>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  $BODY
-</body>
-</html>
+apt update
+
+# --- Install PHP + extensions ---
+PHP_VERSION=8.3
+apt install -y php${PHP_VERSION} php${PHP_VERSION}-{cli,fpm,common,mysql,mbstring,bcmath,xml,zip,curl,gd,tokenizer,ctype,simplexml,dom} mariadb-server nginx redis-server
+
+# --- Install Composer ---
+curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer
+
+# --- Download Pterodactyl Panel ---
+mkdir -p /var/www/pterodactyl
+cd /var/www/pterodactyl
+curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
+tar -xzvf panel.tar.gz
+chmod -R 755 storage/* bootstrap/cache/
+
+# --- MariaDB Setup ---
+DB_NAME=panel
+DB_USER=pterodactyl
+DB_PASS=yourPassword
+mariadb -e "CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';"
+mariadb -e "CREATE DATABASE ${DB_NAME};"
+mariadb -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;"
+mariadb -e "FLUSH PRIVILEGES;"
+
+# --- .env Setup ---
+if [ ! -f ".env.example" ]; then
+    curl -Lo .env.example https://raw.githubusercontent.com/pterodactyl/panel/develop/.env.example
+fi
+cp .env.example .env
+sed -i "s|APP_URL=.*|APP_URL=https://${DOMAIN}|g" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_NAME}|g" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|g" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|g" .env
+if ! grep -q "^APP_ENVIRONMENT_ONLY=" .env; then
+    echo "APP_ENVIRONMENT_ONLY=false" >> .env
+fi
+
+# --- Install PHP dependencies ---
+echo "✅ Installing PHP dependencies..."
+COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+
+# --- Generate Application Key ---
+echo "✅ Generating application key..."
+php artisan key:generate --force
+
+# --- Run Migrations ---
+php artisan migrate --seed --force
+
+# --- Permissions ---
+chown -R www-data:www-data /var/www/pterodactyl/*
+apt install -y cron
+systemctl enable --now cron
+(crontab -l 2>/dev/null; echo "* * * * * php /var/www/pterodactyl/artisan schedule:run >> /dev/null 2>&1") | crontab -
+
+# --- Nginx Setup ---
+mkdir -p /etc/certs/panel
+cd /etc/certs/panel
+openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+-subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" \
+-keyout privkey.pem -out fullchain.pem
+
+tee /etc/nginx/sites-available/pterodactyl.conf > /dev/null << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${DOMAIN};
+
+    root /var/www/pterodactyl/public;
+    index index.php;
+
+    ssl_certificate /etc/certs/panel/fullchain.pem;
+    ssl_certificate_key /etc/certs/panel/privkey.pem;
+
+    client_max_body_size 100m;
+    client_body_timeout 120s;
+    sendfile off;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+        fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
+        fastcgi_index index.php;
+        include /etc/nginx/fastcgi_params;
+        fastcgi_param PHP_VALUE "upload_max_filesize=100M \n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
 EOF
 
-      cat > "$name/style.css" <<EOF
-body { font-family: Arial; background:#f9f9f9; text-align:center; padding:20px; }
-h1 { color:#333; }
-p { color:#555; }
+ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf || true
+nginx -t && systemctl restart nginx
+
+# --- Queue Worker ---
+tee /etc/systemd/system/pteroq.service > /dev/null << 'EOF'
+[Unit]
+Description=Pterodactyl Queue Worker
+After=redis-server.service
+
+[Service]
+User=www-data
+Group=www-data
+Restart=always
+ExecStart=/usr/bin/php /var/www/pterodactyl/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-      cat > "$name/script.js" <<EOF
-console.log("Website '$TITLE' generated successfully 🚀");
-EOF
+systemctl daemon-reload
+systemctl enable --now redis-server
+systemctl enable --now pteroq.service
+clear
 
-      echo "✅ $type website created in folder: $name"
-      ;;
-    4)
-      echo -n "Enter file/folder name to delete: "
-      read target
-      if [ -e "$target" ]; then
-        rm -rf "$target"
-        echo "🗑 Deleted: $target"
-      else
-        echo "⚠️ File/Folder not found!"
-      fi
-      ;;
-    5)
-      echo "🔄 Updating Ai.sh from GitHub..."
-      curl -s -o "$0" "$REPO_URL"
-      echo "✅ Update complete! Restart script."
-      exit 0
-      ;;
-    6)
-      echo "🤖 AI features coming soon..."
-      ;;
-    7)
-      echo "Bye 👋"
-      exit 0
-      ;;
-    *)
-      echo "Invalid option. Try again!"
-      ;;
-  esac
-  echo -e "\nPress Enter to continue..."
-  read
+# --- Admin User ---
+cd /var/www/pterodactyl
+php artisan p:user:make 
+
+sed -i '/^APP_ENVIRONMENT_ONLY=/d' .env
+echo "APP_ENVIRONMENT_ONLY=false" >> .env
+
+# --- Final Output ---
+echo -e "\n\e[1;32m✔ Pterodactyl Panel Setup Complete!\e[0m"
+echo -ne "\e[1;34mFinalizing installation"
+for i in {1..5}; do
+    echo -n "."
+    sleep 0.5
 done
+echo -e "\n"
+
+echo -e "\e[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m"
+echo -e "\e[1;36m  ✅ Installation Completed Successfully! \e[0m"
+echo -e "\e[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m"
+echo -e "\e[1;32m  🌐 Your Panel URL: \e[1;37mhttps://${DOMAIN}\e[0m"
+echo -e "\e[1;32m  📂 Panel Directory: \e[1;37m/var/www/pterodactyl\e[0m"
+echo -e "\e[1;32m  🛠 Create Admin: \e[1;37mphp artisan p:user:make\e[0m"
+echo -e "\e[1;32m  🔑 DB User: \e[1;37m${DB_USER}\e[0m"
+echo -e "\e[1;32m  🔑 DB Password: \e[1;37m${DB_PASS}\e[0m"
+echo -e "\e[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m"
+echo -e "\e[1;35m  🎉 Enjoy your Pterodactyl Panel! \e[0m"
+
+# --- ASCII Banner for XD ---
+echo -e "\e[1;36m"
+echo "██   ██ ██████  "
+echo "██   ██ ██   ██ "
+echo "██   ██ ██████  "
+echo "██   ██ ██   ██ "
+echo " ██████  ██████ "
+echo
+echo "██████  "
+echo "██   ██ "
+echo "██████  "
+echo "██   ██ "
+echo "██████  "
+echo -e "\e[0m"
+echo -e "\e[1;36m               Script by: ${MY_NAME}\e[0m"
